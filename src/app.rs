@@ -1,7 +1,6 @@
 use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, CursorIcon, FontId, Key, Pos2, Rect, Response, RichText, Rounding, Sense, Stroke, Vec2};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::{HotKey, Modifiers, Code}};
-use arboard::Clipboard;
 use crossbeam_channel::Receiver;
 use std::time::Instant;
 
@@ -74,24 +73,124 @@ pub struct WidgetApp {
     pub ignore_clip: Option<String>,
     pub needs_trim: bool,
     pub tray: Option<TrayState>,
+    pub saver: BackgroundSaver,
 }
 
-pub fn spawn_clipboard_thread() -> Receiver<String> {
-    let (tx, rx) = crossbeam_channel::unbounded();
-    std::thread::spawn(move || {
+#[cfg(windows)]
+fn run_windows_clipboard_listener(
+    tx: crossbeam_channel::Sender<String>,
+    ctx: egui::Context,
+) -> bool {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    use windows_sys::Win32::System::DataExchange::*;
+
+    unsafe {
+        let class_name: [u16; 23] = [
+            'N' as u16, 'o' as u16, 't' as u16, 'h' as u16, 'i' as u16, 'n' as u16, 'g' as u16,
+            'C' as u16, 'l' as u16, 'i' as u16, 'p' as u16, 'W' as u16, 'n' as u16, 'd' as u16,
+            'C' as u16, 'l' as u16, 'a' as u16, 's' as u16, 's' as u16, '0' as u16, '1' as u16,
+            'A' as u16, 0,
+        ];
+
+        let wnd_class = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(DefWindowProcW),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: 0 as _,
+            hIcon: 0 as _,
+            hCursor: 0 as _,
+            hbrBackground: 0 as _,
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+        };
+
+        RegisterClassW(&wnd_class);
+
+        // HWND_MESSAGE (-3 as isize as HWND) creates a message-only window: zero rendering, zero taskbar
+        let hwnd_message: HWND = -3isize as HWND;
+        let hwnd = CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            std::ptr::null(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            hwnd_message,
+            0 as _,
+            0 as _,
+            null_mut(),
+        );
+
+        if hwnd == 0 as _ {
+            return false;
+        }
+
+        if AddClipboardFormatListener(hwnd) == 0 {
+            DestroyWindow(hwnd);
+            return false;
+        }
+
         let mut last_text = String::new();
-        if let Ok(mut ctx) = Clipboard::new() {
-            // Seed with the current clipboard so startup doesn't create a note.
-            if let Ok(t) = ctx.get_text() {
+        if let Ok(mut clip) = arboard::Clipboard::new() {
+            if let Ok(t) = clip.get_text() {
+                last_text = t.trim().to_owned();
+            }
+        }
+
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, hwnd, 0, 0) > 0 {
+            if msg.message == WM_CLIPBOARDUPDATE {
+                // OS physically woke us up because clipboard format changed! Zero polling required.
+                if let Ok(mut clip) = arboard::Clipboard::new() {
+                    if let Ok(text) = clip.get_text() {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() && trimmed.len() <= 100_000 && trimmed != last_text {
+                            last_text = trimmed.to_owned();
+                            let _ = tx.send(last_text.clone());
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        RemoveClipboardFormatListener(hwnd);
+        DestroyWindow(hwnd);
+        true
+    }
+}
+
+pub fn spawn_clipboard_thread(ctx: egui::Context) -> Receiver<String> {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let tx_clone = tx.clone();
+    let ctx_clone = ctx.clone();
+    std::thread::spawn(move || {
+        #[cfg(windows)]
+        {
+            if run_windows_clipboard_listener(tx_clone, ctx_clone) {
+                return;
+            }
+        }
+        // Fallback polling loop if native Windows listener couldn't initialize
+        let mut last_text = String::new();
+        if let Ok(mut clip) = arboard::Clipboard::new() {
+            if let Ok(t) = clip.get_text() {
                 last_text = t.trim().to_owned();
             }
             loop {
-                if let Ok(text) = ctx.get_text() {
+                if let Ok(text) = clip.get_text() {
                     let trimmed = text.trim();
-                    // Prevent memory spikes if huge binary/text dumps are copied
                     if !trimmed.is_empty() && trimmed.len() <= 100_000 && trimmed != last_text {
                         last_text = trimmed.to_owned();
                         let _ = tx.send(last_text.clone());
+                        ctx.request_repaint();
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1000));
@@ -117,7 +216,7 @@ fn register_hotkey(manager: &GlobalHotKeyManager) -> (Option<u32>, &'static str)
 }
 
 impl WidgetApp {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Store, ctx: egui::Context) -> Self {
         let notch = store.edge.notch_size();
         // Sync registry state on startup
         set_autostart_registry(store.autostart);
@@ -125,8 +224,9 @@ impl WidgetApp {
         let hotkey_manager = GlobalHotKeyManager::new().unwrap();
         let (hotkey_id, hotkey_label) = register_hotkey(&hotkey_manager);
 
-        let clipboard_rx = spawn_clipboard_thread();
+        let clipboard_rx = spawn_clipboard_thread(ctx.clone());
         let tray = create_tray();
+        let saver = BackgroundSaver::new();
 
         Self {
             store,
@@ -154,6 +254,7 @@ impl WidgetApp {
             ignore_clip: None,
             needs_trim: true,
             tray,
+            saver,
         }
     }
 }
@@ -216,13 +317,13 @@ impl eframe::App for WidgetApp {
             ctx.request_repaint();
         }
 
-        // If currently minimized to tray/taskbar, sleep lightly and don't render UI
+        // If currently minimized to tray/taskbar, sleep and don't render UI
         if self.minimized {
             if self.needs_trim || new_clips {
                 trim_working_set();
                 self.needs_trim = false;
             }
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            ctx.request_repaint_after(std::time::Duration::from_millis(1500));
             return;
         }
 
@@ -234,8 +335,8 @@ impl eframe::App for WidgetApp {
         self.was_focused = focused;
 
         self.handle_shortcuts(ctx);
-        // Polling interval for hotkey and clipboard threads.
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        // Idle watchdog interval (OS clipboard listener, tray events, and hotkeys wake up on-demand)
+        ctx.request_repaint_after(std::time::Duration::from_millis(1500));
 
         if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
             for file in ctx.input(|i| i.raw.dropped_files.clone()) {
@@ -617,7 +718,7 @@ impl WidgetApp {
 
     pub fn save_now(&mut self) {
         self.dirty_since = None;
-        let _ = save_store(&self.store);
+        self.saver.schedule_save(self.store.clone());
     }
 
     fn apply_note_op(&mut self, op: NoteOp, ctx: &egui::Context) {

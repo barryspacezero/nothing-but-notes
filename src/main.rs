@@ -71,7 +71,7 @@ fn main() -> eframe::Result<()> {
             let store = store;
             let theme = Theme::get(store.dark_mode);
             setup_style(&cc.egui_ctx, &theme);
-            Box::new(WidgetApp::new(store))
+            Box::new(WidgetApp::new(store, cc.egui_ctx.clone()))
         }),
     );
     if let Err(ref e) = res {

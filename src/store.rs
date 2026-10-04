@@ -93,7 +93,7 @@ impl Note {
 }
 
 /// Everything persisted to `%APPDATA%\Nothing But Notes\notes.json`.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Clone)]
 pub struct Store {
     #[serde(default)]
     pub notes: Vec<Note>,
@@ -108,6 +108,37 @@ pub struct Store {
     pub autostart: bool,
     #[serde(default)]
     pub dark_mode: bool,
+}
+
+pub struct BackgroundSaver {
+    tx: crossbeam_channel::Sender<Store>,
+}
+
+impl Default for BackgroundSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BackgroundSaver {
+    pub fn new() -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded::<Store>();
+        std::thread::spawn(move || {
+            while let Ok(store) = rx.recv() {
+                let mut latest = store;
+                // Coalesce rapid successive saves into the latest snapshot
+                while let Ok(newer) = rx.try_recv() {
+                    latest = newer;
+                }
+                let _ = save_store(&latest);
+            }
+        });
+        Self { tx }
+    }
+
+    pub fn schedule_save(&self, store: Store) {
+        let _ = self.tx.send(store);
+    }
 }
 
 pub fn data_path() -> PathBuf {
