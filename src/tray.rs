@@ -9,6 +9,7 @@ pub struct TrayState {
     pub item_open: MenuItem,
     pub item_new_note: MenuItem,
     pub item_new_todo: MenuItem,
+    pub item_guide: MenuItem,
     pub item_minimize: MenuItem,
     pub item_quit: MenuItem,
 }
@@ -20,12 +21,14 @@ pub fn create_tray() -> Option<TrayState> {
     let item_open = MenuItem::new("Open Nothing But Notes", true, None);
     let item_new_note = MenuItem::new("New Note", true, None);
     let item_new_todo = MenuItem::new("New To-Do", true, None);
+    let item_guide = MenuItem::new("Features Guide", true, None);
     let item_minimize = MenuItem::new("Minimize", true, None);
     let item_quit = MenuItem::new("Quit", true, None);
 
     let _ = menu.append(&item_open);
     let _ = menu.append(&item_new_note);
     let _ = menu.append(&item_new_todo);
+    let _ = menu.append(&item_guide);
     let _ = menu.append(&item_minimize);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&item_quit);
@@ -42,6 +45,7 @@ pub fn create_tray() -> Option<TrayState> {
         item_open,
         item_new_note,
         item_new_todo,
+        item_guide,
         item_minimize,
         item_quit,
     })
@@ -51,6 +55,7 @@ pub enum TrayAction {
     Open,
     NewNote,
     NewTodo,
+    Guide,
     Minimize,
     Quit,
 }
@@ -63,6 +68,8 @@ pub fn handle_tray_events(tray: &TrayState) -> Option<TrayAction> {
             return Some(TrayAction::NewNote);
         } else if event.id == tray.item_new_todo.id() {
             return Some(TrayAction::NewTodo);
+        } else if event.id == tray.item_guide.id() {
+            return Some(TrayAction::Guide);
         } else if event.id == tray.item_minimize.id() {
             return Some(TrayAction::Minimize);
         } else if event.id == tray.item_quit.id() {

@@ -28,6 +28,7 @@ enum NoteOp {
     NewNote,
     NewList,
     ClearClipboard,
+    Guide,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -465,6 +466,10 @@ impl WidgetApp {
                         self.expanded = true;
                         self.new_list();
                     }
+                    TrayAction::Guide => {
+                        self.unminimize(ctx);
+                        self.open_or_create_guide();
+                    }
                     TrayAction::Minimize => {
                         if self.minimized {
                             self.unminimize(ctx);
@@ -479,6 +484,21 @@ impl WidgetApp {
                     }
                 }
             }
+        }
+    }
+
+    pub fn open_or_create_guide(&mut self) {
+        self.expanded = true;
+        self.tab = ListTab::Notes;
+        if let Some(i) = self.store.notes.iter().position(|n| n.title == DEFAULT_GUIDE_TITLE) {
+            let id = self.store.notes[i].id;
+            self.open_note(id);
+        } else {
+            let note = create_guide_note(&mut self.store.next_id);
+            let id = note.id;
+            self.store.notes.insert(0, note);
+            self.save_now();
+            self.open_note(id);
         }
     }
 
@@ -636,6 +656,7 @@ impl WidgetApp {
             NoteOp::Delete(id) => self.store.notes.retain(|n| n.id != id),
             NoteOp::NewNote => return self.new_note(),
             NoteOp::NewList => return self.new_list(),
+            NoteOp::Guide => return self.open_or_create_guide(),
             NoteOp::ClearClipboard => self.store.notes.retain(|n| !n.is_clipboard || n.pinned),
         }
         self.mark_dirty();
@@ -654,6 +675,7 @@ impl WidgetApp {
         }
 
         let mut min_requested = false;
+        let mut guide_requested = false;
         let mut close_requested = false;
         resp.context_menu(|ui| {
             ui.set_min_width(180.0);
@@ -670,6 +692,10 @@ impl WidgetApp {
                 self.new_list();
                 ui.close_menu();
             }
+            if ui.add(egui::Button::new("Features Guide").min_size(Vec2::new(180.0, 24.0))).clicked() {
+                guide_requested = true;
+                ui.close_menu();
+            }
             ui.separator();
             if ui.add(egui::Button::new("Minimize  (Ctrl+M)").min_size(Vec2::new(180.0, 24.0))).clicked() {
                 min_requested = true;
@@ -681,6 +707,10 @@ impl WidgetApp {
                 ui.close_menu();
             }
         });
+        if guide_requested {
+            self.open_or_create_guide();
+            return;
+        }
         if min_requested {
             self.minimize(ctx);
             return;
@@ -1334,6 +1364,10 @@ fn list_bg_menu(ui: &mut egui::Ui, tab: ListTab, op: &mut Option<NoteOp>) {
             }
             if menu_btn(ui, "New to-do list", None) {
                 *op = Some(NoteOp::NewList);
+            }
+            ui.separator();
+            if menu_btn(ui, "Features guide", None) {
+                *op = Some(NoteOp::Guide);
             }
         }
         ListTab::Clipboard => {

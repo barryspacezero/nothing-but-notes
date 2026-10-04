@@ -125,11 +125,56 @@ pub fn data_path() -> PathBuf {
     new_path
 }
 
+pub const DEFAULT_GUIDE_TITLE: &str = "Nothing But Notes — Quick Guide";
+
+pub const DEFAULT_GUIDE_TEXT: &str = "\
+# NOTHING (R) BUT NOTES
+A minimal, glyph-inspired desktop companion docked directly to your screen edge.
+
+● DOCK & SUMMON
+- Drag the notch along any screen edge (top, bottom, left, right).
+- Click the notch or press Ctrl+Space to expand.
+- Esc or clicking outside collapses it back into your screen edge.
+
+● DUAL TABS: NOTES & CLIPBOARD
+- [NOTES]: Your personal notes & interactive to-do lists.
+- [CLIPBOARD]: Automatically captures copied text in the background without cluttering your notes. Use CLEAR to wipe clips anytime.
+
+● TO-DO LISTS (Ctrl+T)
+- Create interactive checklists with live progress counters.
+- Enter creates a new task; Ctrl+Enter toggles completion.
+- Alt + Up/Down reorders tasks; Backspace on an empty item deletes it.
+
+● MINIMIZE TO TRAY (Ctrl+M)
+- Click [ – ] in the header or right-click the notch to minimize into the system tray & taskbar.
+- Left-click or double-click the tray icon to restore.
+
+● SHORTCUTS
+- Ctrl + N : New note
+- Ctrl + T : New to-do
+- Ctrl + M : Minimize to tray
+- Ctrl + Space : Global summon
+- Esc : Collapse / Back";
+
+pub fn create_guide_note(next_id: &mut u64) -> Note {
+    *next_id += 1;
+    let mut note = Note::new(*next_id, DEFAULT_GUIDE_TEXT.to_string(), false);
+    note.title = DEFAULT_GUIDE_TITLE.to_string();
+    note.pinned = true;
+    note
+}
+
 pub fn load_store() -> Store {
-    std::fs::read_to_string(data_path())
+    let mut store: Store = std::fs::read_to_string(data_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    if store.notes.is_empty() {
+        store.notes.push(create_guide_note(&mut store.next_id));
+        let _ = save_store(&store);
+    }
+    store
 }
 
 pub fn save_store(store: &Store) -> std::io::Result<()> {
