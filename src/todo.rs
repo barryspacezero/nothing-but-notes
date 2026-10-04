@@ -353,7 +353,9 @@ impl WidgetApp {
         if let Some(op) = list_op {
             match op {
                 ListOp::ConvertToText => {
-                    self.store.notes[i].text = list_to_text(&serialize_items(&items));
+                    let n = std::sync::Arc::make_mut(&mut self.store.notes[i]);
+                    n.text = list_to_text(&serialize_items(&items));
+                    n.refresh_cache();
                     self.focus_editor = true;
                     return true;
                 }
@@ -362,7 +364,9 @@ impl WidgetApp {
         }
 
         if changed {
-            self.store.notes[i].text = serialize_items(&items);
+            let n = std::sync::Arc::make_mut(&mut self.store.notes[i]);
+            n.text = serialize_items(&items);
+            n.refresh_cache();
             ctx.request_repaint();
         }
         if self.todo_focus.is_some() {

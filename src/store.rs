@@ -43,6 +43,8 @@ impl Edge {
     }
 }
 
+use std::sync::Arc;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Note {
     pub id: u64,
@@ -56,35 +58,70 @@ pub struct Note {
     pub pinned: bool,
     #[serde(default)]
     pub title: String,
+    #[serde(skip)]
+    pub preview: String,
+    #[serde(skip)]
+    pub display_title: String,
+    #[serde(skip)]
+    pub is_todo_cached: bool,
 }
 
 impl Note {
     pub fn new(id: u64, text: String, is_clipboard: bool) -> Self {
         let now = Local::now().timestamp();
-        Self { id, created: now, updated: now, text, is_clipboard, pinned: false, title: String::new() }
+        let mut note = Self {
+            id,
+            created: now,
+            updated: now,
+            text,
+            is_clipboard,
+            pinned: false,
+            title: String::new(),
+            preview: String::new(),
+            display_title: String::new(),
+            is_todo_cached: false,
+        };
+        note.refresh_cache();
+        note
+    }
+
+    /// Precompute and cache display_title, preview, and is_todo so 60+ FPS UI frames do zero string parsing.
+    pub fn refresh_cache(&mut self) {
+        self.is_todo_cached = is_todo(&self.text);
+        let preview_str = self.content_lines().nth(1).unwrap_or("").to_string();
+        let title_candidate = self.content_lines().next().unwrap_or("Untitled").to_string();
+        let t = self.title.trim();
+        self.display_title = if !t.is_empty() {
+            t.to_string()
+        } else if self.is_todo_cached {
+            "TO-DO".to_string()
+        } else {
+            title_candidate
+        };
+        self.preview = preview_str;
     }
 
     fn content_lines(&self) -> impl Iterator<Item = &str> {
         self.text.lines().map(|l| parse_line(l).1.trim()).filter(|l| !l.is_empty())
     }
 
+    #[inline]
     pub fn title(&self) -> &str {
-        let t = self.title.trim();
-        if !t.is_empty() {
-            return t;
+        if !self.display_title.is_empty() {
+            &self.display_title
+        } else {
+            "Untitled"
         }
-        if self.is_todo() {
-            return "TO-DO";
-        }
-        self.content_lines().next().unwrap_or("Untitled")
     }
 
+    #[inline]
     pub fn preview(&self) -> &str {
-        self.content_lines().nth(1).unwrap_or("")
+        &self.preview
     }
 
+    #[inline]
     pub fn is_todo(&self) -> bool {
-        is_todo(&self.text)
+        self.is_todo_cached
     }
 
     pub fn is_blank(&self) -> bool {
@@ -96,7 +133,7 @@ impl Note {
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct Store {
     #[serde(default)]
-    pub notes: Vec<Note>,
+    pub notes: Vec<Arc<Note>>,
     #[serde(default)]
     pub edge: Edge,
     /// Center of the widget along its docked edge (points). `None` = centered.
@@ -125,8 +162,9 @@ impl BackgroundSaver {
         let (tx, rx) = crossbeam_channel::unbounded::<Store>();
         std::thread::spawn(move || {
             while let Ok(store) = rx.recv() {
+                // Debounce quiet period: wait 400ms to coalesce rapid keystrokes/saves
+                std::thread::sleep(std::time::Duration::from_millis(400));
                 let mut latest = store;
-                // Coalesce rapid successive saves into the latest snapshot
                 while let Ok(newer) = rx.try_recv() {
                     latest = newer;
                 }
@@ -201,8 +239,12 @@ pub fn load_store() -> Store {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
+    for note in &mut store.notes {
+        Arc::make_mut(note).refresh_cache();
+    }
+
     if store.notes.is_empty() {
-        store.notes.push(create_guide_note(&mut store.next_id));
+        store.notes.push(Arc::new(create_guide_note(&mut store.next_id)));
         let _ = save_store(&store);
     }
     store

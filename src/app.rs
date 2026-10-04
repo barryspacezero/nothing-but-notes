@@ -3,6 +3,7 @@ use eframe::egui::{self, Align2, Color32, CursorIcon, FontId, Key, Pos2, Rect, R
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::{HotKey, Modifiers, Code}};
 use crossbeam_channel::Receiver;
 use std::time::Instant;
+use std::sync::Arc;
 
 use crate::*;
 
@@ -309,7 +310,7 @@ impl eframe::App for WidgetApp {
                 continue;
             }
             let id = self.alloc_id();
-            self.store.notes.push(Note::new(id, text, true));
+            self.store.notes.push(Arc::new(Note::new(id, text, true)));
             new_clips = true;
         }
         if new_clips {
@@ -348,7 +349,7 @@ impl eframe::App for WidgetApp {
                         let _ = std::fs::copy(&path, &dest);
                         let text = format!("![{}]({})", name.to_string_lossy(), dest.to_string_lossy());
                         let id = self.alloc_id();
-                        self.store.notes.push(Note::new(id, text, false));
+                        self.store.notes.push(Arc::new(Note::new(id, text, false)));
                         self.save_now();
                     }
                 }
@@ -597,7 +598,7 @@ impl WidgetApp {
         } else {
             let note = create_guide_note(&mut self.store.next_id);
             let id = note.id;
-            self.store.notes.insert(0, note);
+            self.store.notes.insert(0, Arc::new(note));
             self.save_now();
             self.open_note(id);
         }
@@ -616,7 +617,9 @@ impl WidgetApp {
         if let View::Edit(id) = self.view {
             if let Some(note) = self.store.notes.iter_mut().find(|n| n.id == id) {
                 if note.is_todo() {
-                    note.text = crate::todo::prune_trailing_empty_tasks(&note.text);
+                    let n = Arc::make_mut(note);
+                    n.text = crate::todo::prune_trailing_empty_tasks(&n.text);
+                    n.refresh_cache();
                 }
             }
         }
@@ -632,7 +635,7 @@ impl WidgetApp {
         self.tab = ListTab::Notes;
         self.cleanup_empty();
         let id = self.alloc_id();
-        self.store.notes.push(Note::new(id, String::new(), false));
+        self.store.notes.push(Arc::new(Note::new(id, String::new(), false)));
         self.search.clear();
         self.open_note(id);
     }
@@ -641,7 +644,7 @@ impl WidgetApp {
         self.tab = ListTab::Notes;
         self.cleanup_empty();
         let id = self.alloc_id();
-        self.store.notes.push(Note::new(id, "- [ ] ".to_owned(), false));
+        self.store.notes.push(Arc::new(Note::new(id, "- [ ] ".to_owned(), false)));
         self.search.clear();
         self.open_note(id);
         self.todo_focus = Some(0);
@@ -664,7 +667,9 @@ impl WidgetApp {
         if let View::Edit(id) = self.view {
             if let Some(note) = self.store.notes.iter_mut().find(|n| n.id == id) {
                 if note.is_todo() {
-                    note.text = crate::todo::prune_trailing_empty_tasks(&note.text);
+                    let n = Arc::make_mut(note);
+                    n.text = crate::todo::prune_trailing_empty_tasks(&n.text);
+                    n.refresh_cache();
                 }
                 self.tab = if note.is_clipboard { ListTab::Clipboard } else { ListTab::Notes };
             }
@@ -682,7 +687,9 @@ impl WidgetApp {
         self.store.notes.retain(|n| !n.is_blank());
         for note in &mut self.store.notes {
             if note.is_todo() {
-                note.text = crate::todo::prune_trailing_empty_tasks(&note.text);
+                let n = Arc::make_mut(note);
+                n.text = crate::todo::prune_trailing_empty_tasks(&n.text);
+                n.refresh_cache();
             }
         }
         if self.store.notes.len() != before {
@@ -727,14 +734,14 @@ impl WidgetApp {
             NoteOp::Open(id) => self.open_note(id),
             NoteOp::Pin(id) => {
                 if let Some(i) = find(self, id) {
-                    self.store.notes[i].pinned = !self.store.notes[i].pinned;
+                    Arc::make_mut(&mut self.store.notes[i]).pinned = !self.store.notes[i].pinned;
                 }
             }
             NoteOp::Duplicate(id) => {
                 if let Some(i) = find(self, id) {
                     let text = self.store.notes[i].text.clone();
                     let new_id = self.alloc_id();
-                    self.store.notes.push(Note::new(new_id, text, false));
+                    self.store.notes.push(Arc::new(Note::new(new_id, text, false)));
                 }
             }
             NoteOp::Copy(id) => {
@@ -746,12 +753,16 @@ impl WidgetApp {
             }
             NoteOp::ToList(id) => {
                 if let Some(i) = find(self, id) {
-                    self.store.notes[i].text = text_to_list(&self.store.notes[i].text);
+                    let n = Arc::make_mut(&mut self.store.notes[i]);
+                    n.text = text_to_list(&n.text);
+                    n.refresh_cache();
                 }
             }
             NoteOp::ToText(id) => {
                 if let Some(i) = find(self, id) {
-                    self.store.notes[i].text = list_to_text(&self.store.notes[i].text);
+                    let n = Arc::make_mut(&mut self.store.notes[i]);
+                    n.text = list_to_text(&n.text);
+                    n.refresh_cache();
                 }
             }
             NoteOp::Delete(id) => self.store.notes.retain(|n| n.id != id),
@@ -1212,7 +1223,7 @@ impl WidgetApp {
             .on_hover_text(if todo { "Convert to plain note" } else { "Convert to to-do list" })
             .clicked()
         {
-            let note = &mut self.store.notes[i];
+            let note = Arc::make_mut(&mut self.store.notes[i]);
             if todo {
                 note.text = list_to_text(&note.text);
                 self.focus_editor = true;
@@ -1223,6 +1234,7 @@ impl WidgetApp {
                 self.open_todo = Some(crate::todo::parse_items(&note.text));
             }
             note.updated = Local::now().timestamp();
+            note.refresh_cache();
             self.mark_dirty();
             return;
         }
@@ -1273,7 +1285,9 @@ impl WidgetApp {
             ).changed();
 
             if title_changed {
-                self.store.notes[i].title = title_text;
+                let note = Arc::make_mut(&mut self.store.notes[i]);
+                note.title = title_text;
+                note.refresh_cache();
                 self.mark_dirty();
             }
         }
@@ -1310,7 +1324,8 @@ impl WidgetApp {
 
         if changed {
             if let Some(note) = self.store.notes.get_mut(i) {
-                note.updated = Local::now().timestamp();
+                let n = Arc::make_mut(note);
+                n.updated = Local::now().timestamp();
             }
             self.confirm_delete = false;
             self.mark_dirty();
@@ -1359,8 +1374,9 @@ impl WidgetApp {
                         ui.add_space(6.0);
                     }
                     let text_id = egui::Id::new(("editor_text", note_id));
+                    let mut text_buf = self.store.notes[i].text.clone();
                     let resp = ui.add(
-                        egui::TextEdit::multiline(&mut self.store.notes[i].text)
+                        egui::TextEdit::multiline(&mut text_buf)
                             .id(text_id)
                             .frame(false)
                             .desired_width(f32::INFINITY)
@@ -1374,7 +1390,13 @@ impl WidgetApp {
                         resp.request_focus();
                         self.focus_editor = false;
                     }
-                    changed = resp.changed();
+                    if resp.changed() {
+                        let note = Arc::make_mut(&mut self.store.notes[i]);
+                        note.text = text_buf;
+                        note.updated = Local::now().timestamp();
+                        note.refresh_cache();
+                        changed = true;
+                    }
                     resp.context_menu(|ui| {
                         ui.set_min_width(190.0);
                         ui.label(RichText::new("NOTE").font(mono(10.5)).weak());
@@ -1395,8 +1417,9 @@ impl WidgetApp {
         });
 
         if to_list {
-            let note = &mut self.store.notes[i];
+            let note = Arc::make_mut(&mut self.store.notes[i]);
             note.text = text_to_list(&note.text);
+            note.refresh_cache();
             self.todo_focus = Some(note.text.lines().count().saturating_sub(1));
             changed = true;
         }
@@ -1406,7 +1429,7 @@ impl WidgetApp {
             self.copy_text(&ctx, text);
         }
         if pin {
-            self.store.notes[i].pinned = !pinned;
+            Arc::make_mut(&mut self.store.notes[i]).pinned = !pinned;
             changed = true;
         }
         changed
