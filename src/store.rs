@@ -1,18 +1,10 @@
-// Hide the console window in release builds so the widget launches cleanly.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use chrono::{DateTime, Datelike, Local, NaiveDate};
+use chrono::Local;
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Key,
-    Pos2, Rect, Response, RichText, Rounding, Sense, Stroke, Vec2,
+    Rounding, Vec2,
 };
 use serde::{Deserialize, Serialize};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::{HotKey, Modifiers, Code}};
-use arboard::Clipboard;
-use crossbeam_channel::Receiver;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
 
 use crate::*;
 // ── Data model ──────────────────────────────────────────────────────────────

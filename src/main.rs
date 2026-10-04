@@ -1,17 +1,11 @@
 // Hide the console window in release builds so the widget launches cleanly.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use chrono::{DateTime, Datelike, Local, NaiveDate};
+use chrono::Local;
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Key,
-    Pos2, Rect, Response, RichText, Rounding, Sense, Stroke, Vec2,
+    self,
+    Pos2, Rect, Vec2,
 };
-use serde::{Deserialize, Serialize};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::{HotKey, Modifiers, Code}};
-use arboard::Clipboard;
-use crossbeam_channel::Receiver;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 
 mod theme;
@@ -66,7 +60,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let res = eframe::run_native(
         "Nothing But Notes",
         options,
         Box::new(|cc| {
@@ -77,6 +71,11 @@ fn main() -> eframe::Result<()> {
             setup_style(&cc.egui_ctx, &theme);
             Box::new(WidgetApp::new(store))
         }),
-    )
+    );
+    if let Err(ref e) = res {
+        let log = data_path().with_file_name("crash.log");
+        let _ = std::fs::write(log, format!("[run_native error] {e:?}\n"));
+    }
+    res
 }
 

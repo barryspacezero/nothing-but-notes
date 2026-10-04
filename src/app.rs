@@ -62,6 +62,7 @@ pub struct WidgetApp {
     pub clipboard_rx: Receiver<String>,
     /// Text we copied ourselves — the clipboard watcher must not turn it into a note.
     pub ignore_clip: Option<String>,
+    pub needs_trim: bool,
 }
 
 pub fn spawn_clipboard_thread() -> Receiver<String> {
@@ -76,7 +77,8 @@ pub fn spawn_clipboard_thread() -> Receiver<String> {
             loop {
                 if let Ok(text) = ctx.get_text() {
                     let trimmed = text.trim();
-                    if !trimmed.is_empty() && trimmed != last_text {
+                    // Prevent memory spikes if huge binary/text dumps are copied
+                    if !trimmed.is_empty() && trimmed.len() <= 100_000 && trimmed != last_text {
                         last_text = trimmed.to_owned();
                         let _ = tx.send(last_text.clone());
                     }
@@ -136,6 +138,7 @@ impl WidgetApp {
             hotkey_label,
             clipboard_rx,
             ignore_clip: None,
+            needs_trim: true,
         }
     }
 }
@@ -238,7 +241,7 @@ impl eframe::App for WidgetApp {
                 let rounding = if dragging { Rounding::same(r) } else { self.store.edge.rounding(r) };
 
                 ui.painter().rect_filled(rect, rounding, theme.bg);
-                ui.painter().rect_stroke(rect.shrink(0.5), rounding, Stroke::new(1.0, theme.border));
+                ui.painter().rect_stroke(rect.shrink(0.5), rounding, Stroke::new(1.0_f32, theme.border));
 
                 if t > 0.9 {
                     self.draw_panel(ui, ctx, rect, &theme);
@@ -250,8 +253,9 @@ impl eframe::App for WidgetApp {
         self.place_window(ctx, size);
         self.autosave(ctx);
 
-        if ctx.memory(|m| m.focused().is_some()) {
-            ctx.request_repaint(); // continuously repaint when typing so cursor blinks
+        let focused_widget: Option<egui::Id> = ctx.memory(|m| m.focused());
+        if focused_widget.is_some() || matches!(self.view, View::Edit(_)) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
     }
 
@@ -385,8 +389,17 @@ impl WidgetApp {
     }
 
     pub fn collapse(&mut self) {
+        if let View::Edit(id) = self.view {
+            if let Some(note) = self.store.notes.iter_mut().find(|n| n.id == id) {
+                if note.is_todo() {
+                    note.text = crate::todo::prune_trailing_empty_tasks(&note.text);
+                }
+            }
+        }
+        self.open_todo = None;
         self.expanded = false;
         self.confirm_delete = false;
+        self.needs_trim = true;
         self.cleanup_empty();
         self.save_now();
     }
@@ -422,6 +435,13 @@ impl WidgetApp {
     }
 
     pub fn leave_editor(&mut self) {
+        if let View::Edit(id) = self.view {
+            if let Some(note) = self.store.notes.iter_mut().find(|n| n.id == id) {
+                if note.is_todo() {
+                    note.text = crate::todo::prune_trailing_empty_tasks(&note.text);
+                }
+            }
+        }
         self.view = View::List;
         self.confirm_delete = false;
         self.todo_focus = None;
@@ -433,6 +453,11 @@ impl WidgetApp {
     pub fn cleanup_empty(&mut self) {
         let before = self.store.notes.len();
         self.store.notes.retain(|n| !n.is_blank());
+        for note in &mut self.store.notes {
+            if note.is_todo() {
+                note.text = crate::todo::prune_trailing_empty_tasks(&note.text);
+            }
+        }
         if self.store.notes.len() != before {
             self.mark_dirty();
         }
@@ -526,6 +551,11 @@ impl WidgetApp {
             return;
         }
 
+        if self.needs_trim {
+            trim_working_set();
+            self.needs_trim = false;
+        }
+
         let painter = ui.painter();
         let open_tasks: usize = self.store.notes.iter().map(|n| { let (d, t) = progress(&n.text); t - d }).sum();
         let hov = resp.hovered();
@@ -609,7 +639,7 @@ impl WidgetApp {
         }
 
         // Hairline under the header.
-        painter.hline(rect.x_range().shrink(PAD), header.bottom(), Stroke::new(1.0, theme.border));
+        painter.hline(rect.x_range().shrink(PAD), header.bottom(), Stroke::new(1.0_f32, theme.border));
 
         let body_top = header.bottom() + 10.0;
         match self.view {
@@ -631,14 +661,14 @@ impl WidgetApp {
         let search_rect = Rect::from_min_max(Pos2::new(rect.left() + PAD, y), Pos2::new(rect.right() - PAD, y + 34.0));
         let pill = Rounding::same(17.0);
         painter.rect_filled(search_rect, pill, theme.hover);
-        painter.rect_stroke(search_rect, pill, Stroke::new(1.0, theme.border));
-        painter.circle_stroke(Pos2::new(search_rect.left() + 18.0, search_rect.center().y - 1.0), 4.5, Stroke::new(1.3, theme.muted));
+        painter.rect_stroke(search_rect, pill, Stroke::new(1.0_f32, theme.border));
+        painter.circle_stroke(Pos2::new(search_rect.left() + 18.0, search_rect.center().y - 1.0), 4.5, Stroke::new(1.3_f32, theme.muted));
         painter.line_segment(
             [
                 Pos2::new(search_rect.left() + 21.5, search_rect.center().y + 2.5),
                 Pos2::new(search_rect.left() + 24.5, search_rect.center().y + 5.5),
             ],
-            Stroke::new(1.3, theme.muted),
+            Stroke::new(1.3_f32, theme.muted),
         );
         let inner_search = Rect::from_min_max(
             Pos2::new(search_rect.left() + 34.0, search_rect.top() + 8.0),

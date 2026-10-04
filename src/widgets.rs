@@ -12,7 +12,7 @@ pub fn title_button(ui: &mut egui::Ui, center: Pos2, label: &str, color: Color32
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         p.circle_filled(center, 13.0, theme.hover);
-        p.circle_stroke(center, 13.0, Stroke::new(1.0, theme.border));
+        p.circle_stroke(center, 13.0, Stroke::new(1.0_f32, theme.border));
     }
     let col = if resp.is_pointer_button_down_on() { theme.red } else { color };
     p.text(center, Align2::CENTER_CENTER, label, FontId::proportional(15.0), col);
@@ -27,7 +27,7 @@ pub fn zen_button(ui: &mut egui::Ui, pos: Pos2, align: Align2, text: &str, color
 
     let resp = ui.interact(r, egui::Id::new(id), Sense::click());
     let p = ui.painter();
-    p.rect_stroke(r, Rounding::same(r.height() / 2.0), Stroke::new(1.0, theme.border));
+    p.rect_stroke(r, Rounding::same(r.height() / 2.0), Stroke::new(1.0_f32, theme.border));
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         p.rect_filled(r, Rounding::same(r.height() / 2.0), theme.hover);
@@ -102,9 +102,9 @@ pub fn note_row(ui: &mut egui::Ui, note: &Note, theme: &Theme) -> Response {
     if note.pinned {
         p.circle_filled(Pos2::new(mx, my), 3.5, theme.red);
     } else if todo {
-        p.circle_stroke(Pos2::new(mx, my), 4.0, Stroke::new(1.3, theme.text));
+        p.circle_stroke(Pos2::new(mx, my), 4.0, Stroke::new(1.3_f32, theme.text));
     } else if note.is_clipboard {
-        p.rect_stroke(Rect::from_center_size(Pos2::new(mx, my), Vec2::new(7.0, 9.0)), Rounding::same(1.5), Stroke::new(1.2, theme.muted));
+        p.rect_stroke(Rect::from_center_size(Pos2::new(mx, my), Vec2::new(7.0, 9.0)), Rounding::same(1.5), Stroke::new(1.2_f32, theme.muted));
     } else {
         p.circle_filled(Pos2::new(mx, my), 2.0, theme.muted);
     }

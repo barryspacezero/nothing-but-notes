@@ -1,17 +1,9 @@
-// Hide the console window in release builds so the widget launches cleanly.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Key,
-    Pos2, Rect, Response, RichText, Rounding, Sense, Stroke, Vec2,
+    Pos2, Rect, Vec2,
 };
-use serde::{Deserialize, Serialize};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::{HotKey, Modifiers, Code}};
-use arboard::Clipboard;
-use crossbeam_channel::Receiver;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 
 use crate::*;
@@ -127,6 +119,26 @@ pub fn truncate(s: &str, n: usize) -> String {
         format!("{head}…")
     }
 }
+
+#[cfg(windows)]
+extern "system" {
+    fn SetProcessWorkingSetSize(
+        hprocess: *mut std::ffi::c_void,
+        dwminimumworkingsetsize: usize,
+        dwmaximumworkingsetsize: usize,
+    ) -> i32;
+    fn GetCurrentProcess() -> *mut std::ffi::c_void;
+}
+
+/// Commands the Windows memory manager to aggressively reclaim idle physical memory pages.
+pub fn trim_working_set() {
+    #[cfg(windows)]
+    unsafe {
+        let process = GetCurrentProcess();
+        SetProcessWorkingSetSize(process, usize::MAX, usize::MAX);
+    }
+}
+
 
 
 

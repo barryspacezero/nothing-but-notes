@@ -94,14 +94,17 @@ pub fn setup_style(ctx: &egui::Context, theme: &Theme) {
     v.window_fill = theme.bg;
     v.extreme_bg_color = theme.bg;
     v.faint_bg_color = theme.hover;
-    v.window_stroke = Stroke::new(1.0, theme.border);
+    v.window_stroke = Stroke::new(1.0_f32, theme.border);
     v.window_rounding = Rounding::same(12.0);
     v.menu_rounding = Rounding::same(12.0);
     v.window_shadow = egui::epaint::Shadow::NONE;
     v.popup_shadow = egui::epaint::Shadow::NONE;
-    v.text_cursor = Stroke::new(1.5, theme.red);
+    let time = ctx.input(|i| i.time);
+    let blink_on = (time * 1.8).fract() < 0.55;
+    let cursor_color = if blink_on { theme.red } else { Color32::TRANSPARENT };
+    v.text_cursor = Stroke::new(1.5_f32, cursor_color);
     v.selection.bg_fill = theme.red.linear_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, theme.text);
+    v.selection.stroke = Stroke::new(1.0_f32, theme.text);
     v.hyperlink_color = theme.red;
 
     let w = &mut v.widgets;
@@ -115,10 +118,10 @@ pub fn setup_style(ctx: &egui::Context, theme: &Theme) {
         wv.bg_fill = fill;
         wv.weak_bg_fill = fill;
         wv.bg_stroke = Stroke::NONE;
-        wv.fg_stroke = Stroke::new(1.0, theme.text);
+        wv.fg_stroke = Stroke::new(1.0_f32, theme.text);
         wv.rounding = Rounding::same(8.0);
         wv.expansion = 0.0;
     }
-    w.noninteractive.bg_stroke = Stroke::new(1.0, theme.border); // separators
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, theme.border); // separators
     ctx.set_style(style);
 }

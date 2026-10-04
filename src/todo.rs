@@ -26,13 +26,41 @@ pub fn is_todo(text: &str) -> bool {
     text.lines().any(|l| parse_line(l).0.is_some())
 }
 
-/// `(completed, total)` task counts.
+/// `(completed, total)` task counts. Ignores empty/blank tasks so empty new lines don't inflate the count.
 pub fn progress(text: &str) -> (usize, usize) {
-    text.lines().fold((0, 0), |(d, t), l| match parse_line(l).0 {
-        Some(true) => (d + 1, t + 1),
-        Some(false) => (d, t + 1),
-        None => (d, t),
+    text.lines().fold((0, 0), |(d, t), l| {
+        let (done, content) = parse_line(l);
+        if content.trim().is_empty() {
+            return (d, t);
+        }
+        match done {
+            Some(true) => (d + 1, t + 1),
+            Some(false) => (d, t + 1),
+            None => (d, t),
+        }
     })
+}
+
+/// Prune trailing uncompleted empty tasks (e.g. created by pressing Enter and leaving blank).
+pub fn prune_trailing_empty_tasks(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    while let Some(last) = lines.last() {
+        if last.trim().is_empty() {
+            lines.pop();
+            continue;
+        }
+        let (done, content) = parse_line(last);
+        if done == Some(false) && content.trim().is_empty() {
+            lines.pop();
+        } else {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        "- [ ] ".to_owned()
+    } else {
+        lines.join("\n")
+    }
 }
 
 fn is_image(line: &str) -> bool {
@@ -519,5 +547,31 @@ fn list_menu(ui: &mut egui::Ui, list_op: &mut Option<ListOp>) {
         if menu_item(ui, label, "") {
             *list_op = Some(op);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_progress_ignores_empty_tasks() {
+        let text = "- [ ] Task 1\n- [ ] Task 2\n- [ ] ";
+        assert_eq!(progress(text), (0, 2));
+
+        let text_with_blanks = "- [x] Done 1\n- [ ] \n- [ ] Task 2\n- [ ] ";
+        assert_eq!(progress(text_with_blanks), (1, 2));
+    }
+
+    #[test]
+    fn test_prune_trailing_empty_tasks() {
+        let text = "- [ ] Task 1\n- [ ] Task 2\n- [ ] ";
+        assert_eq!(prune_trailing_empty_tasks(text), "- [ ] Task 1\n- [ ] Task 2");
+
+        let text_empty = "- [ ] ";
+        assert_eq!(prune_trailing_empty_tasks(text_empty), "- [ ] ");
+
+        let text_multiple = "- [ ] Task 1\n- [ ] \n- [ ] ";
+        assert_eq!(prune_trailing_empty_tasks(text_multiple), "- [ ] Task 1");
     }
 }
