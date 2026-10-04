@@ -38,7 +38,7 @@ cargo run --release
 cargo build --release
 ```
 
-The resulting executable will be located at `target/release/nothing-notes.exe`.
+The resulting executable will be located at `target/release/nothing-but-notes.exe`.
 
 ---
 

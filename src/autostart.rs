@@ -20,13 +20,19 @@ pub fn set_autostart_registry(enable: bool) {
     };
 
     let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0".encode_utf16().collect();
-    let val_name: Vec<u16> = "NothingNotes\0".encode_utf16().collect();
+    let val_name: Vec<u16> = "Nothing But Notes\0".encode_utf16().collect();
+    let old_val_name: Vec<u16> = "NothingNotes\0".encode_utf16().collect();
 
     let mut hkey = std::ptr::null_mut();
     // SAFETY: Opens the Windows Run key in HKEY_CURRENT_USER.
     let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) };
     if status != 0 {
         return;
+    }
+
+    // Always clean up legacy key name if it exists.
+    unsafe {
+        RegDeleteValueW(hkey, old_val_name.as_ptr());
     }
 
     if enable {

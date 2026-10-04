@@ -92,7 +92,7 @@ impl Note {
     }
 }
 
-/// Everything persisted to `%APPDATA%\NothingNotes\notes.json`.
+/// Everything persisted to `%APPDATA%\Nothing But Notes\notes.json`.
 #[derive(Default, Serialize, Deserialize)]
 pub struct Store {
     #[serde(default)]
@@ -111,11 +111,18 @@ pub struct Store {
 }
 
 pub fn data_path() -> PathBuf {
-    std::env::var_os("APPDATA")
+    let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("NothingNotes")
-        .join("notes.json")
+        .unwrap_or_else(|| PathBuf::from("."));
+    let new_path = base.join("Nothing But Notes").join("notes.json");
+    let old_path = base.join("NothingNotes").join("notes.json");
+    if !new_path.exists() && old_path.exists() {
+        if let Some(parent) = new_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(&old_path, &new_path);
+    }
+    new_path
 }
 
 pub fn load_store() -> Store {
