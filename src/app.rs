@@ -30,11 +30,20 @@ enum NoteOp {
     ClearClipboard,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum ListTab {
+    #[default]
+    Notes,
+    Clipboard,
+}
+
 pub struct WidgetApp {
     pub store: Store,
     pub view: View,
     pub search: String,
+    pub tab: ListTab,
     pub expanded: bool,
+    pub minimized: bool,
     pub was_focused: bool,
     /// Set when a note opens so the editor grabs keyboard focus once.
     pub focus_editor: bool,
@@ -63,6 +72,7 @@ pub struct WidgetApp {
     /// Text we copied ourselves — the clipboard watcher must not turn it into a note.
     pub ignore_clip: Option<String>,
     pub needs_trim: bool,
+    pub tray: Option<TrayState>,
 }
 
 pub fn spawn_clipboard_thread() -> Receiver<String> {
@@ -115,12 +125,15 @@ impl WidgetApp {
         let (hotkey_id, hotkey_label) = register_hotkey(&hotkey_manager);
 
         let clipboard_rx = spawn_clipboard_thread();
+        let tray = create_tray();
 
         Self {
             store,
             view: View::List,
             search: String::new(),
+            tab: ListTab::Notes,
             expanded: false,
+            minimized: false,
             was_focused: false,
             focus_editor: false,
             confirm_delete: false,
@@ -139,6 +152,7 @@ impl WidgetApp {
             clipboard_rx,
             ignore_clip: None,
             needs_trim: true,
+            tray,
         }
     }
 }
@@ -154,19 +168,24 @@ impl eframe::App for WidgetApp {
         let theme = Theme::get(self.store.dark_mode);
         setup_style(ctx, &theme);
 
-        // Clicking anywhere outside the widget collapses it.
-        let focused = ctx.input(|i| i.focused);
-        if self.was_focused && !focused {
-            self.collapse();
+        // Check system tray menu and click events
+        self.check_tray_events(ctx);
+
+        // Track minimization state restored by OS / Taskbar
+        if let Some(min) = ctx.input(|i| i.viewport().minimized) {
+            if !min && self.minimized {
+                self.minimized = false;
+            }
         }
-        self.was_focused = focused;
 
-        self.handle_shortcuts(ctx);
-
+        // Global hotkey handling
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             let ours = self.hotkey_id.map_or(true, |id| id == event.id);
             if ours && event.state == global_hotkey::HotKeyState::Pressed {
-                if !self.expanded {
+                if self.minimized {
+                    self.unminimize(ctx);
+                    self.expanded = true;
+                } else if !self.expanded {
                     self.expanded = true;
                     self.new_note();
                 } else {
@@ -176,9 +195,9 @@ impl eframe::App for WidgetApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
-        // The hotkey and clipboard arrive from other threads; keep polling lightly.
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
 
+        // Drain clipboard events continuously, so clips are captured even when minimized to tray
+        let mut new_clips = false;
         while let Ok(text) = self.clipboard_rx.try_recv() {
             if self.ignore_clip.as_deref() == Some(text.as_str()) {
                 self.ignore_clip = None;
@@ -189,9 +208,33 @@ impl eframe::App for WidgetApp {
             }
             let id = self.alloc_id();
             self.store.notes.push(Note::new(id, text, true));
+            new_clips = true;
+        }
+        if new_clips {
             self.save_now();
             ctx.request_repaint();
         }
+
+        // If currently minimized to tray/taskbar, sleep lightly and don't render UI
+        if self.minimized {
+            if self.needs_trim || new_clips {
+                trim_working_set();
+                self.needs_trim = false;
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            return;
+        }
+
+        // Clicking anywhere outside the widget collapses it.
+        let focused = ctx.input(|i| i.focused);
+        if self.was_focused && !focused {
+            self.collapse();
+        }
+        self.was_focused = focused;
+
+        self.handle_shortcuts(ctx);
+        // Polling interval for hotkey and clipboard threads.
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
 
         if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
             for file in ctx.input(|i| i.raw.dropped_files.clone()) {
@@ -276,6 +319,9 @@ impl WidgetApp {
     }
 
     pub fn place_window(&mut self, ctx: &egui::Context, size: Vec2) {
+        if self.minimized {
+            return;
+        }
         let size = Vec2::new(size.x.round(), size.y.round());
         let pos = if self.drag_grab.is_some() {
             self.drag_pos
@@ -360,14 +406,17 @@ impl WidgetApp {
         if !self.expanded {
             return;
         }
-        let (esc, new, list) = ctx.input(|i| {
+        let (esc, new, list, min) = ctx.input(|i| {
             (
                 i.key_pressed(Key::Escape),
                 i.modifiers.ctrl && i.key_pressed(Key::N),
                 i.modifiers.ctrl && i.key_pressed(Key::T),
+                i.modifiers.ctrl && i.key_pressed(Key::M),
             )
         });
-        if new {
+        if min {
+            self.minimize(ctx);
+        } else if new {
             self.new_note();
         } else if list {
             self.new_list();
@@ -375,6 +424,60 @@ impl WidgetApp {
             match self.view {
                 View::Edit(_) => self.leave_editor(),
                 View::List => self.collapse(),
+            }
+        }
+    }
+
+    pub fn minimize(&mut self, ctx: &egui::Context) {
+        self.minimized = true;
+        self.expanded = false;
+        self.needs_trim = true;
+        self.cleanup_empty();
+        self.save_now();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
+
+    pub fn unminimize(&mut self, ctx: &egui::Context) {
+        self.minimized = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    pub fn check_tray_events(&mut self, ctx: &egui::Context) {
+        if let Some(tray) = &self.tray {
+            if let Some(action) = handle_tray_events(tray) {
+                match action {
+                    TrayAction::Open => {
+                        self.unminimize(ctx);
+                        self.expanded = true;
+                    }
+                    TrayAction::NewNote => {
+                        self.unminimize(ctx);
+                        self.tab = ListTab::Notes;
+                        self.expanded = true;
+                        self.new_note();
+                    }
+                    TrayAction::NewTodo => {
+                        self.unminimize(ctx);
+                        self.tab = ListTab::Notes;
+                        self.expanded = true;
+                        self.new_list();
+                    }
+                    TrayAction::Minimize => {
+                        if self.minimized {
+                            self.unminimize(ctx);
+                        } else {
+                            self.minimize(ctx);
+                        }
+                    }
+                    TrayAction::Quit => {
+                        self.cleanup_empty();
+                        self.save_now();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
             }
         }
     }
@@ -405,6 +508,7 @@ impl WidgetApp {
     }
 
     pub fn new_note(&mut self) {
+        self.tab = ListTab::Notes;
         self.cleanup_empty();
         let id = self.alloc_id();
         self.store.notes.push(Note::new(id, String::new(), false));
@@ -413,6 +517,7 @@ impl WidgetApp {
     }
 
     pub fn new_list(&mut self) {
+        self.tab = ListTab::Notes;
         self.cleanup_empty();
         let id = self.alloc_id();
         self.store.notes.push(Note::new(id, "- [ ] ".to_owned(), false));
@@ -440,6 +545,7 @@ impl WidgetApp {
                 if note.is_todo() {
                     note.text = crate::todo::prune_trailing_empty_tasks(&note.text);
                 }
+                self.tab = if note.is_clipboard { ListTab::Clipboard } else { ListTab::Notes };
             }
         }
         self.view = View::List;
@@ -547,6 +653,45 @@ impl WidgetApp {
             self.focus_editor = matches!(self.view, View::Edit(_));
         }
 
+        let mut min_requested = false;
+        let mut close_requested = false;
+        resp.context_menu(|ui| {
+            ui.set_min_width(180.0);
+            ui.label(RichText::new("NOTCH").font(mono(10.5)).weak());
+            if ui.add(egui::Button::new("Open Notes").min_size(Vec2::new(180.0, 24.0))).clicked() {
+                self.expanded = true;
+                ui.close_menu();
+            }
+            if ui.add(egui::Button::new("New Note  (Ctrl+N)").min_size(Vec2::new(180.0, 24.0))).clicked() {
+                self.new_note();
+                ui.close_menu();
+            }
+            if ui.add(egui::Button::new("New To-Do  (Ctrl+T)").min_size(Vec2::new(180.0, 24.0))).clicked() {
+                self.new_list();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.add(egui::Button::new("Minimize  (Ctrl+M)").min_size(Vec2::new(180.0, 24.0))).clicked() {
+                min_requested = true;
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.add(egui::Button::new("Quit").min_size(Vec2::new(180.0, 24.0))).clicked() {
+                close_requested = true;
+                ui.close_menu();
+            }
+        });
+        if min_requested {
+            self.minimize(ctx);
+            return;
+        }
+        if close_requested {
+            self.cleanup_empty();
+            self.save_now();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
         if (self.store.edge.notch_size() - self.notch).length() > 2.0 {
             return;
         }
@@ -557,7 +702,8 @@ impl WidgetApp {
         }
 
         let painter = ui.painter();
-        let open_tasks: usize = self.store.notes.iter().map(|n| { let (d, t) = progress(&n.text); t - d }).sum();
+        let regular_notes_count = self.store.notes.iter().filter(|n| !n.is_clipboard).count();
+        let open_tasks: usize = self.store.notes.iter().filter(|n| !n.is_clipboard).map(|n| { let (d, t) = progress(&n.text); t - d }).sum();
         let hov = resp.hovered();
         let label_col = if hov { theme.red } else { theme.text };
 
@@ -580,7 +726,7 @@ impl WidgetApp {
             painter.text(
                 Pos2::new(rect.right() - 14.0, cy + 1.0),
                 Align2::RIGHT_CENTER,
-                format!("{:02}", self.store.notes.len()),
+                format!("{:02}", regular_notes_count),
                 doto(15.0),
                 theme.muted,
             );
@@ -610,10 +756,11 @@ impl WidgetApp {
 
         let by = rect.top() + 30.0;
         let close_c = Pos2::new(rect.right() - PAD - 6.0, by);
-        let theme_c = close_c - Vec2::new(30.0, 0.0);
-        let auto_c = theme_c - Vec2::new(30.0, 0.0);
-        let list_c = auto_c - Vec2::new(30.0, 0.0);
-        let add_c = list_c - Vec2::new(30.0, 0.0);
+        let min_c = close_c - Vec2::new(28.0, 0.0);
+        let theme_c = min_c - Vec2::new(28.0, 0.0);
+        let auto_c = theme_c - Vec2::new(28.0, 0.0);
+        let list_c = auto_c - Vec2::new(28.0, 0.0);
+        let add_c = list_c - Vec2::new(28.0, 0.0);
 
         if title_button(ui, add_c, "+", theme.text, "btn_add", theme).on_hover_text("New note  (Ctrl+N)").clicked() {
             self.new_note();
@@ -631,6 +778,9 @@ impl WidgetApp {
         if title_button(ui, theme_c, theme_icon, theme.text, "btn_theme", theme).on_hover_text("Toggle theme").clicked() {
             self.store.dark_mode = !self.store.dark_mode;
             self.mark_dirty();
+        }
+        if title_button(ui, min_c, "–", theme.text, "btn_min", theme).on_hover_text("Minimize to tray & taskbar  (Ctrl+M)").clicked() {
+            self.minimize(ctx);
         }
         if title_button(ui, close_c, "×", theme.text, "btn_close", theme).on_hover_text("Quit").clicked() {
             self.cleanup_empty();
@@ -657,41 +807,152 @@ impl WidgetApp {
     pub fn draw_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, rect: Rect, y: f32, theme: &Theme) {
         let painter = ui.painter().clone();
 
-        // Search pill.
-        let search_rect = Rect::from_min_max(Pos2::new(rect.left() + PAD, y), Pos2::new(rect.right() - PAD, y + 34.0));
-        let pill = Rounding::same(17.0);
-        painter.rect_filled(search_rect, pill, theme.hover);
-        painter.rect_stroke(search_rect, pill, Stroke::new(1.0_f32, theme.border));
-        painter.circle_stroke(Pos2::new(search_rect.left() + 18.0, search_rect.center().y - 1.0), 4.5, Stroke::new(1.3_f32, theme.muted));
+        let notes_count = self.store.notes.iter().filter(|n| !n.is_clipboard).count();
+        let clips_count = self.store.notes.iter().filter(|n| n.is_clipboard).count();
+
+        // ── Tab Bar ──
+        let tab_h = 28.0;
+        let tab_rect = Rect::from_min_max(Pos2::new(rect.left() + PAD, y), Pos2::new(rect.right() - PAD, y + tab_h));
+        let tab_w = (tab_rect.width() - 8.0) / 2.0;
+
+        let notes_tab_rect = Rect::from_min_size(tab_rect.min, Vec2::new(tab_w, tab_h));
+        let clips_tab_rect = Rect::from_min_size(Pos2::new(tab_rect.left() + tab_w + 8.0, tab_rect.top()), Vec2::new(tab_w, tab_h));
+
+        let pill = Rounding::same(tab_h / 2.0);
+
+        // Notes Tab
+        let notes_resp = ui.interact(notes_tab_rect, egui::Id::new("tab_notes"), Sense::click());
+        if notes_resp.hovered() {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
+        }
+        if notes_resp.clicked() {
+            self.tab = ListTab::Notes;
+        }
+        let notes_active = self.tab == ListTab::Notes;
+        if notes_active {
+            painter.rect_filled(notes_tab_rect, pill, theme.hover);
+            painter.rect_stroke(notes_tab_rect, pill, Stroke::new(1.0_f32, theme.border));
+            painter.circle_filled(Pos2::new(notes_tab_rect.left() + 14.0, notes_tab_rect.center().y), 3.0, theme.red);
+        } else if notes_resp.hovered() {
+            painter.rect_filled(notes_tab_rect, pill, theme.hover.linear_multiply(0.5));
+        }
+        let notes_col = if notes_active { theme.text } else { theme.muted };
+        let notes_x = if notes_active { notes_tab_rect.center().x + 6.0 } else { notes_tab_rect.center().x };
+        painter.text(
+            Pos2::new(notes_x, notes_tab_rect.center().y),
+            Align2::CENTER_CENTER,
+            format!("NOTES ({notes_count})"),
+            mono(11.0),
+            notes_col,
+        );
+
+        // Clipboard Tab
+        let clips_resp = ui.interact(clips_tab_rect, egui::Id::new("tab_clips"), Sense::click());
+        if clips_resp.hovered() {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
+        }
+        if clips_resp.clicked() {
+            self.tab = ListTab::Clipboard;
+        }
+        let clips_active = self.tab == ListTab::Clipboard;
+        if clips_active {
+            painter.rect_filled(clips_tab_rect, pill, theme.hover);
+            painter.rect_stroke(clips_tab_rect, pill, Stroke::new(1.0_f32, theme.border));
+            painter.circle_filled(Pos2::new(clips_tab_rect.left() + 14.0, clips_tab_rect.center().y), 3.0, theme.red);
+        } else if clips_resp.hovered() {
+            painter.rect_filled(clips_tab_rect, pill, theme.hover.linear_multiply(0.5));
+        }
+        let clips_col = if clips_active { theme.text } else { theme.muted };
+        let clips_x = if clips_active { clips_tab_rect.center().x + 6.0 } else { clips_tab_rect.center().x };
+        painter.text(
+            Pos2::new(clips_x, clips_tab_rect.center().y),
+            Align2::CENTER_CENTER,
+            format!("CLIPBOARD ({clips_count})"),
+            mono(11.0),
+            clips_col,
+        );
+
+        // ── Search Pill ──
+        let search_y = y + tab_h + 8.0;
+        let search_h = 32.0;
+        let clear_w = if self.tab == ListTab::Clipboard && clips_count > 0 { 66.0 } else { 0.0 };
+        let search_rect = Rect::from_min_max(
+            Pos2::new(rect.left() + PAD, search_y),
+            Pos2::new(rect.right() - PAD - clear_w, search_y + search_h),
+        );
+        let pill_search = Rounding::same(16.0);
+        painter.rect_filled(search_rect, pill_search, theme.hover);
+        painter.rect_stroke(search_rect, pill_search, Stroke::new(1.0_f32, theme.border));
+        painter.circle_stroke(Pos2::new(search_rect.left() + 16.0, search_rect.center().y - 1.0), 4.0, Stroke::new(1.3_f32, theme.muted));
         painter.line_segment(
             [
-                Pos2::new(search_rect.left() + 21.5, search_rect.center().y + 2.5),
-                Pos2::new(search_rect.left() + 24.5, search_rect.center().y + 5.5),
+                Pos2::new(search_rect.left() + 19.0, search_rect.center().y + 2.0),
+                Pos2::new(search_rect.left() + 22.0, search_rect.center().y + 5.0),
             ],
             Stroke::new(1.3_f32, theme.muted),
         );
         let inner_search = Rect::from_min_max(
-            Pos2::new(search_rect.left() + 34.0, search_rect.top() + 8.0),
-            Pos2::new(search_rect.right() - 14.0, search_rect.bottom() - 8.0),
+            Pos2::new(search_rect.left() + 30.0, search_rect.top() + 7.0),
+            Pos2::new(search_rect.right() - 12.0, search_rect.bottom() - 7.0),
         );
+        let hint_text = if self.tab == ListTab::Clipboard { "Search clipboard…" } else { "Search notes…" };
         ui.allocate_ui_at_rect(inner_search, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.search)
                     .frame(false)
                     .desired_width(f32::INFINITY)
-                    .font(FontId::proportional(14.0))
+                    .font(FontId::proportional(13.5))
                     .text_color(theme.text)
-                    .hint_text(RichText::new("Search").font(FontId::proportional(14.0)).color(theme.muted)),
+                    .hint_text(RichText::new(hint_text).font(FontId::proportional(13.5)).color(theme.muted)),
             );
         });
 
-        let list_rect = Rect::from_min_max(Pos2::new(rect.left() + PAD - 6.0, y + 46.0), Pos2::new(rect.right() - PAD + 6.0, rect.bottom() - 40.0));
+        // Quick "CLEAR" button in Clipboard tab if clips exist
+        let mut clear_clicked = false;
+        if self.tab == ListTab::Clipboard && clips_count > 0 {
+            let clear_rect = Rect::from_min_size(
+                Pos2::new(rect.right() - PAD - 60.0, search_y),
+                Vec2::new(60.0, search_h),
+            );
+            let clear_resp = ui.interact(clear_rect, egui::Id::new("btn_clear_clips"), Sense::click());
+            if clear_resp.hovered() {
+                ctx.set_cursor_icon(CursorIcon::PointingHand);
+                painter.rect_filled(clear_rect, pill_search, theme.hover);
+            }
+            painter.rect_stroke(clear_rect, pill_search, Stroke::new(1.0_f32, theme.border));
+            let clear_col = if clear_resp.hovered() { theme.red } else { theme.muted };
+            painter.text(clear_rect.center(), Align2::CENTER_CENTER, "CLEAR", mono(10.5), clear_col);
+            if clear_resp.clicked() {
+                clear_clicked = true;
+            }
+        }
+        if clear_clicked {
+            self.store.notes.retain(|n| !n.is_clipboard);
+            self.mark_dirty();
+        }
+
+        let list_rect = Rect::from_min_max(
+            Pos2::new(rect.left() + PAD - 6.0, search_y + search_h + 8.0),
+            Pos2::new(rect.right() - PAD + 6.0, rect.bottom() - 40.0),
+        );
 
         let q = self.search.trim().to_lowercase();
         let mut idx: Vec<usize> = (0..self.store.notes.len())
             .filter(|&i| {
-                if q.is_empty() { return true; }
                 let note = &self.store.notes[i];
+                match self.tab {
+                    ListTab::Notes => {
+                        if note.is_clipboard {
+                            return false;
+                        }
+                    }
+                    ListTab::Clipboard => {
+                        if !note.is_clipboard {
+                            return false;
+                        }
+                    }
+                }
+                if q.is_empty() { return true; }
                 crate::utils::contains_ignore_case(&note.text, &q) || crate::utils::contains_ignore_case(&note.title, &q)
             })
             .collect();
@@ -718,17 +979,26 @@ impl WidgetApp {
         let mut op: Option<NoteOp> = None;
 
         if groups.is_empty() {
-            let (title, hint) = if self.store.notes.is_empty() {
-                ("EMPTY", format!("+ for a note  ·  ☑ for a list  ·  {}", self.hotkey_label))
+            let (title, hint) = if self.tab == ListTab::Clipboard {
+                if clips_count == 0 {
+                    ("NO CLIPS", "Copied text will automatically appear here".to_string())
+                } else {
+                    ("NO MATCH", "No clipboard clips match your search".to_string())
+                }
             } else {
-                ("NO MATCH", "Nothing matches your search".to_owned())
+                if notes_count == 0 {
+                    ("EMPTY", format!("+ for a note  ·  ☑ for a list  ·  {}", self.hotkey_label))
+                } else {
+                    ("NO MATCH", "Nothing matches your search".to_string())
+                }
             };
             let c = list_rect.center();
             dot_grid(&painter, Rect::from_center_size(c - Vec2::new(0.0, 6.0), Vec2::new(120.0, 54.0)), 9.0, theme.dots);
             painter.text(Pos2::new(c.x, c.y - 8.0), Align2::CENTER_CENTER, title, doto(30.0), theme.text);
             painter.text(Pos2::new(c.x, c.y + 26.0), Align2::CENTER_CENTER, hint, mono(10.5), theme.muted);
             let bg = ui.interact(list_rect, egui::Id::new("list_bg_empty"), Sense::click());
-            bg.context_menu(|ui| list_bg_menu(ui, &mut op));
+            let tab = self.tab;
+            bg.context_menu(|ui| list_bg_menu(ui, tab, &mut op));
         } else {
             ui.allocate_ui_at_rect(list_rect, |ui| {
                 egui::ScrollArea::vertical()
@@ -757,7 +1027,8 @@ impl WidgetApp {
                         let rest = ui.available_rect_before_wrap();
                         if rest.height() > 0.0 {
                             let bg = ui.interact(rest, egui::Id::new("list_bg"), Sense::click());
-                            bg.context_menu(|ui| list_bg_menu(ui, &mut op));
+                            let tab = self.tab;
+                            bg.context_menu(|ui| list_bg_menu(ui, tab, &mut op));
                         }
                     });
             });
@@ -766,8 +1037,13 @@ impl WidgetApp {
             self.apply_note_op(op, ctx);
         }
 
-        let open_tasks: usize = self.store.notes.iter().map(|n| { let (d, t) = progress(&n.text); t - d }).sum();
-        let footer = format!("{:02} NOTES  ·  {:02} OPEN TASKS", self.store.notes.len(), open_tasks);
+        let footer = match self.tab {
+            ListTab::Clipboard => format!("{:02} CLIPS SAVED", clips_count),
+            ListTab::Notes => {
+                let open_tasks: usize = self.store.notes.iter().filter(|n| !n.is_clipboard).map(|n| { let (d, t) = progress(&n.text); t - d }).sum();
+                format!("{:02} NOTES  ·  {:02} OPEN TASKS", notes_count, open_tasks)
+            }
+        };
         self.draw_footer(&painter, rect, footer, theme);
     }
 
@@ -1048,17 +1324,24 @@ fn note_menu(ui: &mut egui::Ui, id: u64, pinned: bool, todo: bool, op: &mut Opti
     }
 }
 
-fn list_bg_menu(ui: &mut egui::Ui, op: &mut Option<NoteOp>) {
-    ui.set_min_width(190.0);
-    ui.label(RichText::new("NOTES").font(mono(10.5)).weak());
-    if menu_btn(ui, "New note", None) {
-        *op = Some(NoteOp::NewNote);
-    }
-    if menu_btn(ui, "New to-do list", None) {
-        *op = Some(NoteOp::NewList);
-    }
-    ui.separator();
-    if menu_btn(ui, "Clear clipboard notes", None) {
-        *op = Some(NoteOp::ClearClipboard);
+fn list_bg_menu(ui: &mut egui::Ui, tab: ListTab, op: &mut Option<NoteOp>) {
+    match tab {
+        ListTab::Notes => {
+            ui.set_min_width(190.0);
+            ui.label(RichText::new("NOTES").font(mono(10.5)).weak());
+            if menu_btn(ui, "New note", None) {
+                *op = Some(NoteOp::NewNote);
+            }
+            if menu_btn(ui, "New to-do list", None) {
+                *op = Some(NoteOp::NewList);
+            }
+        }
+        ListTab::Clipboard => {
+            ui.set_min_width(190.0);
+            ui.label(RichText::new("CLIPBOARD").font(mono(10.5)).weak());
+            if menu_btn(ui, "Clear all captured clips", Some(Color32::from_rgb(235, 45, 45))) {
+                *op = Some(NoteOp::ClearClipboard);
+            }
+        }
     }
 }

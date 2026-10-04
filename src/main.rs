@@ -15,6 +15,7 @@ mod autostart;
 mod app;
 mod widgets;
 mod todo;
+mod tray;
 
 pub use theme::*;
 pub use utils::*;
@@ -23,6 +24,7 @@ pub use autostart::*;
 pub use app::*;
 pub use widgets::*;
 pub use todo::*;
+pub use tray::*;
 
 fn main() -> eframe::Result<()> {
     // Release builds have no console, so record any crash next to the notes file.
@@ -53,7 +55,7 @@ fn main() -> eframe::Result<()> {
             .with_decorations(false) // frameless
             .with_transparent(true) // rounded corners need a see-through window
             .with_always_on_top() // floats above other windows like a notch
-            .with_taskbar(false) // no taskbar icon
+            .with_taskbar(true) // visible on taskbar and allows minimizing to taskbar
             .with_resizable(false)
             .with_inner_size(notch)
             .with_position(start),
